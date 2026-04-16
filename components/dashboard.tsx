@@ -193,7 +193,7 @@ export function Dashboard() {
                 <Tooltip
                   contentStyle={{ background: '#0f172a', border: '1px solid rgba(167, 182, 211, 0.16)', borderRadius: 14 }}
                   labelStyle={{ color: '#eef4ff' }}
-                  formatter={(value: number) => [value, 'Заказы']}
+                  formatter={(value) => [Number(value ?? 0), 'Заказы']}
                   labelFormatter={(label) => formatDate(`${label}T00:00:00.000Z`)}
                 />
                 <Line type="monotone" dataKey="orders" stroke="#7dd3fc" strokeWidth={3} dot={false} />
