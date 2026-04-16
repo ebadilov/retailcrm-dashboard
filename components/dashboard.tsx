@@ -2,263 +2,329 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Bar,
-  BarChart,
   CartesianGrid,
   Line,
   LineChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
-  YAxis
+  YAxis,
 } from 'recharts';
-import { supabaseBrowser } from '@/lib/supabase-browser';
-import { formatCurrency, formatDate, formatDateTime, formatDay } from '@/lib/format';
-import type { CityPoint, DailyPoint, DashboardOrder, Metrics } from '@/lib/types';
+import { createClient } from '@supabase/supabase-js';
 
-function buildMetrics(orders: DashboardOrder[]): Metrics {
-  const totalRevenue = orders.reduce((sum, order) => sum + Number(order.total_sum || 0), 0);
-  const highValueOrders = orders.filter((order) => Number(order.total_sum) > 50000).length;
+type DashboardOrder = {
+  external_id: string;
+  order_number: string | null;
+  customer_label: string | null;
+  city: string | null;
+  total_sum: number;
+  status: string | null;
+  created_at: string;
+  synced_at: string;
+};
 
-  return {
-    totalOrders: orders.length,
-    totalRevenue,
-    averageOrderValue: orders.length ? totalRevenue / orders.length : 0,
-    highValueOrders
-  };
+type DailyPoint = {
+  date: string;
+  orders: number;
+  revenue: number;
+};
+
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+function formatMoney(value: number) {
+  return new Intl.NumberFormat('ru-RU', {
+    style: 'currency',
+    currency: 'KZT',
+    maximumFractionDigits: 0,
+  }).format(value);
 }
 
-function buildDailyPoints(orders: DashboardOrder[]): DailyPoint[] {
-  const byDay = new Map<string, { orders: number; revenue: number }>();
+function formatDate(value: string) {
+  return new Intl.DateTimeFormat('ru-RU', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  }).format(new Date(value));
+}
 
-  for (const order of orders) {
-    const key = new Date(order.created_at).toISOString().slice(0, 10);
-    const current = byDay.get(key) ?? { orders: 0, revenue: 0 };
-    current.orders += 1;
-    current.revenue += Number(order.total_sum || 0);
-    byDay.set(key, current);
+function formatShortDate(value: string) {
+  return new Intl.DateTimeFormat('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+  }).format(new Date(value));
+}
+
+function toNumber(value: unknown): number {
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
   }
-
-  return [...byDay.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .slice(-14)
-    .map(([date, values]) => ({
-      date,
-      orders: values.orders,
-      revenue: values.revenue
-    }));
+  return 0;
 }
 
-function buildCityPoints(orders: DashboardOrder[]): CityPoint[] {
-  const byCity = new Map<string, number>();
-
-  for (const order of orders) {
-    const city = order.city?.trim() || 'Не указан';
-    byCity.set(city, (byCity.get(city) ?? 0) + 1);
-  }
-
-  return [...byCity.entries()]
-    .map(([city, orders]) => ({ city, orders }))
-    .sort((a, b) => b.orders - a.orders)
-    .slice(0, 7);
-}
-
-function MetricCard({ title, value, subtitle }: { title: string; value: string; subtitle: string }) {
-  return (
-    <div className="metric-card">
-      <div className="metric-title">{title}</div>
-      <div className="metric-value">{value}</div>
-      <div className="metric-subtitle">{subtitle}</div>
-    </div>
-  );
-}
-
-export function Dashboard() {
+export default function Dashboard() {
   const [orders, setOrders] = useState<DashboardOrder[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  const [pulse, setPulse] = useState(false);
 
-  useEffect(() => {
-    let cancelled = false;
+  async function loadOrders() {
+    const { data, error } = await supabase
+      .from('dashboard_orders')
+      .select('*')
+      .order('created_at', { ascending: false });
 
-    async function loadOrders() {
-      const { data, error } = await supabaseBrowser
-        .from('dashboard_orders')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(300);
-
-      if (cancelled) return;
-
-      if (error) {
-        setError(error.message);
-      } else {
-        setOrders((data ?? []) as DashboardOrder[]);
-        setLastUpdated(new Date());
-      }
-
+    if (error) {
+      console.error('Failed to load orders:', error);
+      setOrders([]);
       setLoading(false);
+      return;
     }
 
-    void loadOrders();
+    setOrders((data as DashboardOrder[]) || []);
+    setLoading(false);
+  }
 
-    const channel = supabaseBrowser
-      .channel('dashboard-orders-live')
+  useEffect(() => {
+    loadOrders();
+
+    const channel = supabase
+      .channel('dashboard-orders-realtime')
       .on(
         'postgres_changes',
-        { event: '*', schema: 'public', table: 'dashboard_orders' },
-        async () => {
-          const { data } = await supabaseBrowser
-            .from('dashboard_orders')
-            .select('*')
-            .order('created_at', { ascending: false })
-            .limit(300);
-
-          setOrders((data ?? []) as DashboardOrder[]);
-          setLastUpdated(new Date());
-          setPulse(true);
-          window.setTimeout(() => setPulse(false), 1200);
+        {
+          event: '*',
+          schema: 'public',
+          table: 'dashboard_orders',
+        },
+        () => {
+          loadOrders();
         }
       )
       .subscribe();
 
     return () => {
-      cancelled = true;
-      void supabaseBrowser.removeChannel(channel);
+      supabase.removeChannel(channel);
     };
   }, []);
 
-  const metrics = useMemo(() => buildMetrics(orders), [orders]);
-  const dailyPoints = useMemo(() => buildDailyPoints(orders), [orders]);
-  const cityPoints = useMemo(() => buildCityPoints(orders), [orders]);
+  const stats = useMemo(() => {
+    const totalOrders = orders.length;
+    const totalRevenue = orders.reduce((sum, order) => sum + toNumber(order.total_sum), 0);
+    const averageCheck = totalOrders > 0 ? totalRevenue / totalOrders : 0;
+
+    const bigOrders = orders.filter((order) => toNumber(order.total_sum) > 50000).length;
+
+    return {
+      totalOrders,
+      totalRevenue,
+      averageCheck,
+      bigOrders,
+    };
+  }, [orders]);
+
+  const dailyData = useMemo<DailyPoint[]>(() => {
+    const grouped = new Map<string, DailyPoint>();
+
+    for (const order of orders) {
+      const dateKey = new Date(order.created_at).toISOString().slice(0, 10);
+
+      if (!grouped.has(dateKey)) {
+        grouped.set(dateKey, {
+          date: dateKey,
+          orders: 0,
+          revenue: 0,
+        });
+      }
+
+      const current = grouped.get(dateKey)!;
+      current.orders += 1;
+      current.revenue += toNumber(order.total_sum);
+    }
+
+    return Array.from(grouped.values()).sort((a, b) => a.date.localeCompare(b.date));
+  }, [orders]);
+
   const recentOrders = useMemo(() => orders.slice(0, 10), [orders]);
 
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center">
+        <div className="text-lg">Загрузка дашборда...</div>
+      </div>
+    );
+  }
+
   return (
-    <main className="page-shell">
-      <section className="hero-card">
-        <div>
-          <div className="eyebrow">RetailCRM × Supabase × Vercel</div>
-          <h1 className="hero-title">Мини-дашборд заказов</h1>
-          <p className="hero-text">
-            Данные подтягиваются из Supabase, а интерфейс подписан на обновления таблицы в реальном времени.
+    <div className="min-h-screen bg-slate-950 text-slate-100">
+      <div className="mx-auto max-w-7xl px-6 py-10">
+        <div className="mb-8">
+          <h1 className="text-3xl font-bold tracking-tight">Мини-дашборд заказов</h1>
+          <p className="mt-2 text-slate-400">
+            Данные из RetailCRM через Supabase с обновлением в реальном времени
           </p>
         </div>
-        <div className={`live-pill ${pulse ? 'pulse' : ''}`}>
-          <span className="live-dot" />
-          <span>{lastUpdated ? `Обновлено ${lastUpdated.toLocaleTimeString('ru-RU')}` : 'Ожидание данных'}</span>
+
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4 mb-8">
+          <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5 shadow-sm">
+            <div className="text-sm text-slate-400">Всего заказов</div>
+            <div className="mt-2 text-3xl font-semibold">{stats.totalOrders}</div>
+          </div>
+
+          <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5 shadow-sm">
+            <div className="text-sm text-slate-400">Общая выручка</div>
+            <div className="mt-2 text-3xl font-semibold">{formatMoney(stats.totalRevenue)}</div>
+          </div>
+
+          <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5 shadow-sm">
+            <div className="text-sm text-slate-400">Средний чек</div>
+            <div className="mt-2 text-3xl font-semibold">{formatMoney(stats.averageCheck)}</div>
+          </div>
+
+          <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5 shadow-sm">
+            <div className="text-sm text-slate-400">Заказы свыше 50 000 ₸</div>
+            <div className="mt-2 text-3xl font-semibold">{stats.bigOrders}</div>
+          </div>
         </div>
-      </section>
 
-      {error ? <div className="error-box">Ошибка загрузки: {error}</div> : null}
+        <div className="grid gap-6 xl:grid-cols-3">
+          <div className="xl:col-span-2 rounded-2xl border border-slate-800 bg-slate-900 p-5">
+            <div className="mb-4">
+              <h2 className="text-xl font-semibold">Динамика заказов</h2>
+              <p className="text-sm text-slate-400">
+                Количество заказов по дням
+              </p>
+            </div>
 
-      <section className="metrics-grid">
-        <MetricCard
-          title="Всего заказов"
-          value={loading ? '…' : String(metrics.totalOrders)}
-          subtitle="Общее количество синхронизированных заказов"
-        />
-        <MetricCard
-          title="Оборот"
-          value={loading ? '…' : formatCurrency(metrics.totalRevenue)}
-          subtitle="Сумма всех заказов в витрине"
-        />
-        <MetricCard
-          title="Средний чек"
-          value={loading ? '…' : formatCurrency(metrics.averageOrderValue)}
-          subtitle="Средняя сумма заказа"
-        />
-        <MetricCard
-          title="Крупные заказы"
-          value={loading ? '…' : String(metrics.highValueOrders)}
-          subtitle="Заказы свыше 50 000 ₸"
-        />
-      </section>
-
-      <section className="charts-grid">
-        <div className="panel-card chart-panel">
-          <div className="panel-header">
-            <div>
-              <h2>Динамика заказов</h2>
-              <p>Последние 14 дней</p>
+            <div className="h-[340px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={dailyData}>
+                  <CartesianGrid stroke="rgba(148, 163, 184, 0.12)" vertical={false} />
+                  <XAxis
+                    dataKey="date"
+                    tick={{ fill: '#cbd5e1', fontSize: 12 }}
+                    tickFormatter={(value) => formatShortDate(`${value}T00:00:00.000Z`)}
+                    axisLine={false}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    tick={{ fill: '#cbd5e1', fontSize: 12 }}
+                    axisLine={false}
+                    tickLine={false}
+                    allowDecimals={false}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      background: '#0f172a',
+                      border: '1px solid rgba(167, 182, 255, 0.18)',
+                      borderRadius: 14,
+                    }}
+                    labelStyle={{ color: '#eef4ff' }}
+                    formatter={(value) => [Number(value ?? 0), 'Заказы']}
+                    labelFormatter={(label) => formatDate(`${label}T00:00:00.000Z`)}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="orders"
+                    stroke="#7dd3fc"
+                    strokeWidth={3}
+                    dot={false}
+                    activeDot={{ r: 5 }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
             </div>
           </div>
-          <div className="chart-wrap">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={dailyPoints}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(167, 182, 211, 0.16)" />
-                <XAxis dataKey="date" tickFormatter={formatDay} tickLine={false} axisLine={false} tick={{ fill: '#a7b6d3', fontSize: 12 }} />
-                <YAxis allowDecimals={false} tickLine={false} axisLine={false} tick={{ fill: '#a7b6d3', fontSize: 12 }} />
-                <Tooltip
-                  contentStyle={{ background: '#0f172a', border: '1px solid rgba(167, 182, 211, 0.16)', borderRadius: 14 }}
-                  labelStyle={{ color: '#eef4ff' }}
-                  formatter={(value) => [Number(value ?? 0), 'Заказы']}
-                  labelFormatter={(label) => formatDate(`${label}T00:00:00.000Z`)}
-                />
-                <Line type="monotone" dataKey="orders" stroke="#7dd3fc" strokeWidth={3} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
 
-        <div className="panel-card chart-panel">
-          <div className="panel-header">
-            <div>
-              <h2>Заказы по городам</h2>
-              <p>Топ направлений доставки</p>
+          <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
+            <div className="mb-4">
+              <h2 className="text-xl font-semibold">Последние заказы</h2>
+              <p className="text-sm text-slate-400">
+                Последние 10 записей из витрины dashboard_orders
+              </p>
+            </div>
+
+            <div className="space-y-3">
+              {recentOrders.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-slate-700 p-6 text-sm text-slate-400">
+                  Заказы пока не найдены
+                </div>
+              ) : (
+                recentOrders.map((order) => (
+                  <div
+                    key={order.external_id}
+                    className="rounded-xl border border-slate-800 bg-slate-950/60 p-4"
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <div className="font-medium text-slate-100">
+                          {order.order_number || order.external_id}
+                        </div>
+                        <div className="mt-1 text-sm text-slate-400">
+                          {order.customer_label || 'Без имени клиента'}
+                        </div>
+                      </div>
+                      <div className="text-sm font-semibold text-sky-300">
+                        {formatMoney(toNumber(order.total_sum))}
+                      </div>
+                    </div>
+
+                    <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-400">
+                      <span className="rounded-full bg-slate-800 px-2 py-1">
+                        {order.city || 'Город не указан'}
+                      </span>
+                      <span className="rounded-full bg-slate-800 px-2 py-1">
+                        {order.status || 'Без статуса'}
+                      </span>
+                      <span className="rounded-full bg-slate-800 px-2 py-1">
+                        {formatDate(order.created_at)}
+                      </span>
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
           </div>
-          <div className="chart-wrap">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={cityPoints} layout="vertical" margin={{ left: 8, right: 12 }}>
-                <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(167, 182, 211, 0.16)" />
-                <XAxis type="number" allowDecimals={false} tickLine={false} axisLine={false} tick={{ fill: '#a7b6d3', fontSize: 12 }} />
-                <YAxis dataKey="city" type="category" width={90} tickLine={false} axisLine={false} tick={{ fill: '#a7b6d3', fontSize: 12 }} />
-                <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid rgba(167, 182, 211, 0.16)', borderRadius: 14 }} labelStyle={{ color: '#eef4ff' }} formatter={(value: number) => [value, 'Заказы']} />
-                <Bar dataKey="orders" fill="#a78bfa" radius={[10, 10, 10, 10]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
         </div>
-      </section>
 
-      <section className="panel-card table-panel">
-        <div className="panel-header">
-          <div>
-            <h2>Последние заказы</h2>
-            <p>Витрина из безопасной публичной таблицы dashboard_orders</p>
+        <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-5">
+          <div className="mb-4">
+            <h2 className="text-xl font-semibold">Сводка</h2>
+            <p className="text-sm text-slate-400">
+              Базовая аналитика по витрине заказов
+            </p>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <div className="rounded-xl bg-slate-950/60 p-4">
+              <div className="text-sm text-slate-400">Городов в выборке</div>
+              <div className="mt-2 text-2xl font-semibold">
+                {new Set(orders.map((o) => o.city).filter(Boolean)).size}
+              </div>
+            </div>
+
+            <div className="rounded-xl bg-slate-950/60 p-4">
+              <div className="text-sm text-slate-400">Последняя синхронизация</div>
+              <div className="mt-2 text-2xl font-semibold">
+                {orders[0]?.synced_at ? formatDate(orders[0].synced_at) : 'Нет данных'}
+              </div>
+            </div>
+
+            <div className="rounded-xl bg-slate-950/60 p-4">
+              <div className="text-sm text-slate-400">Максимальный заказ</div>
+              <div className="mt-2 text-2xl font-semibold">
+                {formatMoney(
+                  orders.length
+                    ? Math.max(...orders.map((o) => toNumber(o.total_sum)))
+                    : 0
+                )}
+              </div>
+            </div>
           </div>
         </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Номер</th>
-                <th>Клиент</th>
-                <th>Город</th>
-                <th>Статус</th>
-                <th>Сумма</th>
-                <th>Создан</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recentOrders.map((order) => (
-                <tr key={order.external_id}>
-                  <td>{order.order_number || order.external_id}</td>
-                  <td>{order.customer_label || '—'}</td>
-                  <td>{order.city || '—'}</td>
-                  <td>
-                    <span className="status-chip">{order.status || 'new'}</span>
-                  </td>
-                  <td>{formatCurrency(Number(order.total_sum || 0))}</td>
-                  <td>{formatDateTime(order.created_at)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
-    </main>
+      </div>
+    </div>
   );
 }
