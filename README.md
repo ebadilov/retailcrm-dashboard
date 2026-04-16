@@ -1,88 +1,74 @@
-# RetailCRM Mini Dashboard
+RetailCRM Mini Dashboard
 
-Готовый MVP для тестового задания:
-- импорт mock-заказов в RetailCRM;
-- синк RetailCRM -> Supabase;
-- красивый дашборд на Next.js;
-- realtime-обновления через Supabase Realtime;
-- авто-уведомления в Telegram для заказов > 50 000 ₸;
-- cron на Vercel каждые 5 минут.
+Мини-дашборд заказов с интеграцией RetailCRM → Supabase → Vercel и уведомлениями в Telegram.
 
-## 1) Стек
-- Next.js App Router
-- Supabase (Postgres + Realtime)
-- Vercel Cron Jobs
-- Telegram Bot API
-- Python-скрипты для локального импорта и проверки
+Стек
+RetailCRM API — источник заказов
+Supabase (PostgreSQL + Realtime) — хранение и поток данных
+Next.js — веб-интерфейс
+Vercel — деплой и cron-задачи
+Telegram Bot — уведомления
+Функциональность
+загрузка тестовых заказов в RetailCRM
+синхронизация заказов в Supabase
+дашборд с отображением заказов и базовой аналитикой
+обновление данных в реальном времени
+уведомления в Telegram при заказах свыше 50 000 ₸
 
-## 2) Подготовка Supabase
-1. Открой SQL Editor.
-2. Выполни `supabase/schema.sql`.
-3. Возьми:
-   - Project URL
-   - anon key
-   - service_role key
+Использование AI-инструментов
 
-## 3) Переменные окружения
-Скопируй `.env.example` в `.env.local`:
+В процессе разработки активно использовались AI-инструменты (Claude Code, ChatGPT) для ускорения реализации и решения узких технических задач.
 
-```bash
-cp .env.example .env
-```
+Примеры промптов
+Напиши Python-скрипт, который будет забирать заказы из RetailCRM API и сохранять их в Supabase, при этом нужно предусмотреть защиту от дублей и нормализовать поля (имя клиента, сумма, город, дата создания).
+Помоги разобраться с ошибкой 400 при создании заказа в RetailCRM через API, покажи корректный формат запроса и объясни, какие поля обязательны и как правильно передавать вложенный объект order.
+Сгенерируй структуру Next.js приложения для дашборда, который будет получать данные из Supabase и отображать список заказов и простой график по сумме заказов.
+Покажи, как подключить Supabase Realtime к Next.js приложению, чтобы при изменении данных в таблице обновлялся интерфейс без перезагрузки страницы.
+Подскажи, как правильно организовать серверный endpoint (API route) для периодической синхронизации данных и как защитить его через секретный ключ.
+Помоги реализовать отправку уведомлений в Telegram при выполнении условия (сумма заказа больше заданного порога), с минимальным количеством зависимостей.
+Возникшие сложности и решения
+1. Ошибка при создании заказов в RetailCRM
 
-Заполни переменные.
+Проблема:
+API возвращал ошибку:
 
-## 4) Локальный запуск
-```bash
-npm install
-npm run dev
-```
+OrderType with code "eshop-individual" does not exist
 
-Открой `http://localhost:3000`.
+Причина:
+в демо-аккаунте отсутствовали соответствующие справочники (orderType, orderMethod, status).
 
-## 5) Импорт mock_orders.json в RetailCRM
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python scripts/import_mock_orders.py ./mock_orders.json
-```
+Решение:
+убраны поля orderType, orderMethod, status из запроса, чтобы использовать значения по умолчанию на стороне CRM.
 
-Если твой `mock_orders.json` уже почти в формате RetailCRM, скрипт подхватит существующие поля. Если структура другая, поправь `build_retailcrm_order()`.
+2. Формат запроса в RetailCRM API
 
-## 6) Локальная синхронизация
-```bash
-python scripts/sync_retailcrm_to_supabase.py
-```
+Проблема:
+передача JSON через json= не принималась API.
 
-## 7) Деплой на Vercel
-```bash
-npm i -g vercel
-vercel
-vercel --prod
-```
+Решение:
+использование form-data и передача заказа как строки:
 
-После этого:
-1. Добавь все переменные из `.env.example` в Project Settings -> Environment Variables.
-2. Убедись, что `CRON_SECRET` тоже добавлен.
-3. Заново сделай `vercel --prod`, чтобы cron применился.
+order = json.dumps(order_data)
+3. Работа с переменными окружения
 
-## 8) Проверка cron
-Эндпоинт:
-```text
-/api/cron/sync
-```
+Проблема:
+Python-скрипты не видели .env.local.
 
-Cron вызывается каждые 5 минут по `vercel.json`.
+Решение:
+использование файла .env и load_dotenv().
 
-## 9) Что важно по безопасности
-- Никогда не коммить `service_role` key, `RetailCRM API key`, `Telegram bot token`.
-- Ключи, которые были засвечены, перевыпусти.
-- В клиентский код отдаётся только `NEXT_PUBLIC_SUPABASE_URL` и `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
-- Реальные сырые заказы хранятся в таблице `orders`, а публичный UI читает только `dashboard_orders`.
+4. Ошибки в структуре базы Supabase
 
-## 10) Что отдавать как результат тестового
-- ссылка на Vercel
-- ссылка на GitHub
-- скрин уведомления Telegram
-- короткое описание архитектуры: RetailCRM -> Vercel cron -> Supabase -> realtime dashboard
+Проблема:
+конфликт структуры таблиц и отсутствие нужных полей.
+
+Решение:
+пересоздание таблиц и явное добавление всех колонок, включая alert_sent_at.
+
+5. Дублирование уведомлений
+
+Проблема:
+Telegram-уведомления отправлялись при каждом запуске синхронизации.
+
+Решение:
+добавлено поле alert_sent_at, позволяющее отправлять уведомление только один раз.
